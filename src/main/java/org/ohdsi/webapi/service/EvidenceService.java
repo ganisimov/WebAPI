@@ -8,8 +8,6 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.util.Arrays;
 import javax.ws.rs.Consumes;
 
 import javax.ws.rs.GET;
@@ -20,11 +18,13 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 import org.apache.commons.httpclient.util.URIUtil;
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.ohdsi.sql.SqlRender;
 import org.ohdsi.sql.SqlTranslate;
+//import org.ohdsi.webapi.cohortanalysis.CohortAnalysisTasklet;
 import org.ohdsi.webapi.evidence.CohortStudyMapping;
 import org.ohdsi.webapi.evidence.CohortStudyMappingRepository;
 import org.ohdsi.webapi.evidence.ConceptCohortMapping;
@@ -46,9 +46,19 @@ import org.ohdsi.webapi.evidence.Evidence;
 import org.ohdsi.webapi.evidence.LinkoutData;
 import org.ohdsi.webapi.evidence.SpontaneousReport;
 import org.ohdsi.webapi.evidence.EvidenceSearch;
+import org.ohdsi.webapi.evidence.PredictiveProbability;
+import org.ohdsi.webapi.evidence.PredictiveProbabilityRecord;
+import org.ohdsi.webapi.evidence.PredictiveProbabilityRepository;
+import org.ohdsi.webapi.evidence.PredictiveProbabilityTasklet;
+import org.ohdsi.webapi.job.JobExecutionResource;
+import org.ohdsi.webapi.job.JobTemplate;
+import org.ohdsi.webapi.util.SessionUtils;
 import org.ohdsi.webapi.source.Source;
 import org.ohdsi.webapi.source.SourceDaimon;
+import org.springframework.batch.core.JobParameters;
+import org.springframework.batch.core.JobParametersBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
@@ -58,7 +68,9 @@ import org.springframework.stereotype.Component;
 @Path("{sourceKey}/evidence/")
 @Component
 public class EvidenceService extends AbstractDaoService {
-
+  @Autowired
+  private JobTemplate jobTemplate;
+        
   @Autowired
   private DrugLabelRepository drugLabelRepository;
 
@@ -70,6 +82,9 @@ public class EvidenceService extends AbstractDaoService {
 
   @Autowired
   private CohortStudyMappingRepository cohortStudyMappingRepository;
+  
+  @Autowired
+  private PredictiveProbabilityRepository predictiveProbabilityRepository;
   
   @GET
   @Path("study/{cohortId}")
@@ -609,6 +624,88 @@ public class EvidenceService extends AbstractDaoService {
 	  return results;
   }
 
+/**
+ * Queues up a predictive probabilities task, that generates and translates SQL for the
+ * given concept ids
+ *
+ * @param task - the predictive probability task to run
+ * @return information about the Predictive Probability Job
+ * @throws Exception
+ */
+  @POST
+  @Path("predictiveprobability")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Consumes(MediaType.APPLICATION_JSON)
+  public JobExecutionResource queuePredictiveProbabilityJob(@PathParam("sourceKey") String sourceKey, PredictiveProbability task) throws Exception {
+        if (task == null) {
+                return null;
+        }
+        JobParametersBuilder builder = new JobParametersBuilder();
+
+        // Get a JDBC template for the OHDSI source repository 
+        // and the source dialect for use when we write the results
+        // back to the OHDSI repository
+        JdbcTemplate jdbcTemplate = getJdbcTemplate();
+        task.setJdbcTemplate(jdbcTemplate);
+        String ohdsiDatasourceSourceDialect = getSourceDialect();
+        task.setSourceDialect(ohdsiDatasourceSourceDialect);
+
+        // source key comes from the client, we look it up here and hand it off to the tasklet
+        Source source = getSourceRepository().findBySourceKey(sourceKey);
+        task.setSource(source);
+
+        if (!StringUtils.isEmpty(task.getJobName())) {
+                builder.addString("jobName", limitJobParams(task.getJobName()));
+        }
+        final String taskString = task.toString();
+        final JobParameters jobParameters = builder.toJobParameters();
+        log.info(String.format("Beginning run for negative controls analysis task: \n %s", taskString));
+
+        PredictiveProbabilityTasklet tasklet = new PredictiveProbabilityTasklet(task, getSourceJdbcTemplate(task.getSource()), task.getJdbcTemplate(),
+                        getTransactionTemplate(), this.getSourceDialect());
+
+        return this.jobTemplate.launchTasklet("predictiveProbabilityAnalysisJob", "predictiveProbabilityAnalysisStep", tasklet, jobParameters);
+}
+
+  @GET
+  @Path("predictiveprobability/{conceptsetid}")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Collection<PredictiveProbabilityRecord> getPredictiveProbablity(@PathParam("conceptsetid") int conceptSetId) {
+    return predictiveProbabilityRepository.findAllByConceptSetId(conceptSetId);
+  }
+ /**
+  * Obtain the SQL that is used to retrieve the list of negative controls from the database
+  * @param task
+  * @return A sql statement
+  */
+  public static String getPredictiveProbabilitySql(PredictiveProbability task) {
+    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/getPredictiveProbability.sql");
+
+    String tableQualifier = task.getSource().getTableQualifier(SourceDaimon.DaimonType.Evidence);
+    String conceptIds = JoinArray(task.getConceptIds());
+    String[] params = new String[]{"tableQualifier", "CONCEPT_IDS", "CONCEPT_SET_ID", "CONCEPT_SET_NAME", "CONCEPT_DOMAIN_ID", "TARGET_DOMAIN_ID"};
+    String[] values = new String[]{tableQualifier, conceptIds, String.valueOf(task.getConceptSetId()), task.getConceptSetName(), task.getConceptDomainId(), task.getTargetDomainId()};
+    sql = SqlRender.renderSql(sql, params, values);
+    sql = SqlTranslate.translateSql(sql, "sql server", task.getSource().getSourceDialect());
+
+    return sql;
+}
+
+  public static String getPredictiveProbabilityDeleteStatementSql(PredictiveProbability task){
+    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/deletePredictiveProbability.sql");
+    sql = SqlTranslate.translateSql(sql, "sql server", task.getSourceDialect());
+
+    return sql;            
+}
+
+  public static String getPredictiveProbabilityInsertStatementSql(PredictiveProbability task){
+    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/insertPredictiveProbability.sql");
+    sql = SqlTranslate.translateSql(sql, "sql server", task.getSourceDialect());
+
+    return sql;            
+}
+
   //parse ADRAnnotation linkouts
   private EvidenceDetails getADRlinkout(JSONArray lineItems,int j) throws JSONException {
 	  EvidenceDetails e = new EvidenceDetails();
@@ -698,7 +795,7 @@ public class EvidenceService extends AbstractDaoService {
 	  return e;
   }
   
-  private String JoinArray(final String[] array) {
+  private static String JoinArray(final String[] array) {
     String result = "";
 
     for (int i = 0; i < array.length; i++) {
@@ -712,4 +809,10 @@ public class EvidenceService extends AbstractDaoService {
     return result;
   }
 
+  private static String limitJobParams(String param) {
+            if (param.length() >= 250) {
+                    return param.substring(0, 245) + "...";
+            }
+            return param;
+    }
 }
