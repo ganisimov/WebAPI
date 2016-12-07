@@ -118,10 +118,23 @@ public class AtlasSecurity extends Security {
 
   @Override
   public Map<String, String> getFilterChain() {
+      // Provide default filters and then dynamically
+      // set SSL into the search path based on its setting
+      // in the application settings.
+      String filtersBeforeOAuth = "cors, forceSessionCreation";
+      String restFilters = "noSessionCreation, cors";
+      String oAuthCallbackFilters = "handleUnsuccessfullOAuth, oauthCallback";
+      if (sslEnabled) {
+          filtersBeforeOAuth = "ssl, " + filtersBeforeOAuth;
+          restFilters = "ssl, " + restFilters;
+          oAuthCallbackFilters = "ssl, " + oAuthCallbackFilters;
+      }
 
     return new FilterChainBuilder()
-      .setOAuthFilters("ssl, cors, forceSessionCreation", "updateToken, sendTokenInUrl")
-      .setRestFilters("ssl, noSessionCreation, cors")
+      //.setOAuthFilters("ssl, cors, forceSessionCreation", "updateToken, sendTokenInUrl")
+      .setOAuthFilters(filtersBeforeOAuth, "updateToken, sendTokenInUrl")
+      //.setRestFilters("ssl, noSessionCreation, cors")
+      .setRestFilters(restFilters)
       .setAuthcFilter("jwtAuthc")
       .setAuthzFilter("authz")
 
@@ -135,7 +148,8 @@ public class AtlasSecurity extends Security {
       .addRestPath("/user/logout", "invalidateToken, logout")
       .addOAuthPath("/user/oauth/google", "googleAuthc")
       .addOAuthPath("/user/oauth/facebook", "facebookAuthc")
-      .addPath("/user/oauth/callback", "ssl, handleUnsuccessfullOAuth, oauthCallback")
+      //.addPath("/user/oauth/callback", "ssl, handleUnsuccessfullOAuth, oauthCallback")
+      .addPath("/user/oauth/callback", oAuthCallbackFilters)
 
       // permissions
       .addProtectedRestPath("/user/**")
@@ -186,8 +200,9 @@ public class AtlasSecurity extends Security {
     filters.put("skipFurtherFiltersIfNotPutOrPost", this.getskipFurtherFiltersIfNotPutOrPostFilter());
     filters.put("sendTokenInUrl", new SendTokenInUrlFilter(this.oauthUiCallback));
     filters.put("sendTokenInHeader", new SendTokenInHeaderFilter());
-    filters.put("ssl", this.getSslFilter());
-
+    if (sslEnabled) {
+        filters.put("ssl", this.getSslFilter());
+    }
     // OAuth
     //
     Google2Client googleClient = new Google2Client(this.googleApiKey, this.googleApiSecret);
