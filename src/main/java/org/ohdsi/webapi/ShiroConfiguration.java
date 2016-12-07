@@ -1,6 +1,8 @@
 package org.ohdsi.webapi;
 
 import java.util.*;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.shiro.realm.Realm;
 import org.apache.shiro.spring.web.ShiroFilterFactoryBean;
 import org.apache.shiro.web.mgt.DefaultWebSecurityManager;
@@ -17,16 +19,21 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class ShiroConfiguration {
+    protected final Log log = LogFactory.getLog(getClass());
 
-  @Value("${security.disabled}")
-  private boolean disabled;
+  @Value("${security.enabled}")
+  private boolean enabled;
 
   @Bean
   public Security security() {
-    if (disabled)
-      return new DisabledSecurity();
-    else
-      return new AtlasSecurity();
+    if (enabled) {
+        log.debug("Security enabled; AtlasSecurity loaded.");
+        return new AtlasSecurity();
+    }
+    else {
+        log.debug("Security disabled; DisabledSecurity loaded.");
+        return new DisabledSecurity();
+    }
   };
 
   @Bean
